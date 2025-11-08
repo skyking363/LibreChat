@@ -1,6 +1,8 @@
 const { logger } = require('@librechat/data-schemas');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { sleep, SplitStreamHandler, CustomOpenAIClient: OpenAI } = require('@librechat/agents');
+const { observeOpenAI } = require('langfuse');
+const langfuseService = require('~/server/services/LangfuseService');
 const {
   isEnabled,
   Tokenizer,
@@ -879,7 +881,7 @@ class OpenAIClient extends BaseClient {
 
       let chatCompletion;
       /** @type {OpenAI} */
-      const openai = new OpenAI({
+      let openai = new OpenAI({
         fetch: createFetch({
           directEndpoint: this.options.directEndpoint,
           reverseProxyUrl: this.options.reverseProxyUrl,
@@ -887,6 +889,18 @@ class OpenAIClient extends BaseClient {
         apiKey: this.apiKey,
         ...opts,
       });
+
+      // Wrap OpenAI client with Langfuse observability if enabled
+      if (langfuseService.isEnabled() && this.langfuseTrace) {
+        try {
+          openai = observeOpenAI(openai, {
+            parent: this.langfuseTrace,
+            generationName: 'openai-chat-completion',
+          });
+        } catch (error) {
+          logger.debug('[OpenAIClient] Failed to observe OpenAI client with Langfuse', error);
+        }
+      }
 
       /* Re-orders system message to the top of the messages payload, as not allowed anywhere else */
       if (modelOptions.messages && (opts.baseURL.includes('api.mistral.ai') || this.isOllama)) {

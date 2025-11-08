@@ -23,6 +23,7 @@ const { jwtLogin, ldapLogin, passportLogin } = require('~/strategies');
 const { updateInterfacePermissions } = require('~/models/interface');
 const { checkMigrations } = require('./services/start/migration');
 const initializeMCPs = require('./services/initializeMCPs');
+const langfuseService = require('./services/LangfuseService');
 const configureSocialLogins = require('./socialLogins');
 const { getAppConfig } = require('./services/Config');
 const staticCache = require('./utils/staticCache');
@@ -49,6 +50,9 @@ const startServer = async () => {
   indexSync().catch((err) => {
     logger.error('[indexSync] Background sync failed:', err);
   });
+
+  // Initialize Langfuse for LLM observability
+  langfuseService.initialize();
 
   app.disable('x-powered-by');
   app.set('trust proxy', trusted_proxy);

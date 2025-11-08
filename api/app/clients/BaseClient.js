@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const fetch = require('node-fetch');
 const { logger } = require('@librechat/data-schemas');
+const langfuseService = require('~/server/services/LangfuseService');
 const {
   getBalanceConfig,
   extractFileContext,
@@ -71,6 +72,12 @@ class BaseClient {
     this.currentMessages = [];
     /** @type {import('librechat-data-provider').VisionModes | undefined} */
     this.visionMode;
+    /** Langfuse trace for observability
+     * @type {Object | null} */
+    this.langfuseTrace = null;
+    /** Langfuse generation for tracking LLM calls
+     * @type {Object | null} */
+    this.langfuseGeneration = null;
   }
 
   setOptions() {
@@ -589,6 +596,24 @@ class BaseClient {
     const { user, head, isEdited, conversationId, responseMessageId, saveOptions, userMessage } =
       await this.handleStartMethods(message, opts);
 
+    // Initialize Langfuse trace for observability
+    try {
+      this.langfuseTrace = langfuseService.trace({
+        name: 'chat-completion',
+        userId: this.user || user,
+        sessionId: conversationId,
+        metadata: {
+          endpoint: this.options.endpoint,
+          model: this.modelOptions?.model ?? this.model,
+          isEdited,
+          messageId: responseMessageId,
+          parentMessageId: userMessage.messageId,
+        },
+      });
+    } catch (error) {
+      logger.debug('[BaseClient] Failed to create Langfuse trace', error);
+    }
+
     if (opts.progressCallback) {
       opts.onProgress = opts.progressCallback.call(null, {
         ...(opts.progressOptions ?? {}),
@@ -690,9 +715,59 @@ class BaseClient {
     }
 
     /** @type {string|string[]|undefined} */
-    const completion = await this.sendCompletion(payload, opts);
-    if (this.abortController) {
-      this.abortController.requestCompleted = true;
+    let completion;
+    const completionStartTime = Date.now();
+
+    // Start Langfuse generation tracking
+    try {
+      if (this.langfuseTrace) {
+        this.langfuseGeneration = langfuseService.generation(this.langfuseTrace, {
+          name: 'llm-completion',
+          model: this.modelOptions?.model ?? this.model,
+          input: payload,
+          metadata: {
+            endpoint: this.options.endpoint,
+            temperature: this.modelOptions?.temperature,
+            maxTokens: this.modelOptions?.max_tokens,
+            topP: this.modelOptions?.top_p,
+            frequencyPenalty: this.modelOptions?.frequency_penalty,
+            presencePenalty: this.modelOptions?.presence_penalty,
+          },
+        });
+      }
+    } catch (error) {
+      logger.debug('[BaseClient] Failed to create Langfuse generation', error);
+    }
+
+    try {
+      completion = await this.sendCompletion(payload, opts);
+      if (this.abortController) {
+        this.abortController.requestCompleted = true;
+      }
+
+      // Update Langfuse generation with completion
+      if (this.langfuseGeneration) {
+        const completionEndTime = Date.now();
+        const latencyMs = completionEndTime - completionStartTime;
+
+        this.langfuseGeneration.update({
+          output: completion,
+          endTime: new Date(completionEndTime),
+          metadata: {
+            latencyMs,
+          },
+        });
+      }
+    } catch (error) {
+      // Log error to Langfuse
+      if (this.langfuseGeneration) {
+        this.langfuseGeneration.update({
+          level: 'ERROR',
+          statusMessage: error.message,
+          endTime: new Date(),
+        });
+      }
+      throw error;
     }
 
     /** @type {TMessage} */
@@ -799,6 +874,47 @@ class BaseClient {
       user,
     );
     this.savedMessageIds.add(responseMessage.messageId);
+
+    // Finalize Langfuse trace with token usage
+    try {
+      if (this.langfuseTrace) {
+        const traceMetadata = {
+          conversationId,
+          responseMessageId,
+          userMessageId: userMessage.messageId,
+          model: responseMessage.model,
+          endpoint: this.options.endpoint,
+        };
+
+        // Add token usage if available
+        if (responseMessage.promptTokens || responseMessage.tokenCount) {
+          traceMetadata.usage = {
+            promptTokens: responseMessage.promptTokens || promptTokens,
+            completionTokens: responseMessage.tokenCount,
+            totalTokens: (responseMessage.promptTokens || promptTokens || 0) + (responseMessage.tokenCount || 0),
+          };
+        }
+
+        langfuseService.updateTrace(this.langfuseTrace, {
+          output: responseMessage.text || responseMessage.content,
+          metadata: traceMetadata,
+        });
+
+        // Update generation with token usage
+        if (this.langfuseGeneration && (responseMessage.promptTokens || responseMessage.tokenCount)) {
+          this.langfuseGeneration.update({
+            usage: {
+              input: responseMessage.promptTokens || promptTokens,
+              output: responseMessage.tokenCount,
+              total: (responseMessage.promptTokens || promptTokens || 0) + (responseMessage.tokenCount || 0),
+            },
+          });
+        }
+      }
+    } catch (error) {
+      logger.debug('[BaseClient] Failed to update Langfuse trace', error);
+    }
+
     delete responseMessage.tokenCount;
     return responseMessage;
   }
