@@ -716,6 +716,7 @@ class BaseClient {
 
     /** @type {string|string[]|undefined} */
     let completion;
+    let metadata;
     const completionStartTime = Date.now();
 
     // Start Langfuse generation tracking
@@ -740,7 +741,9 @@ class BaseClient {
     }
 
     try {
-      completion = await this.sendCompletion(payload, opts);
+      const result = await this.sendCompletion(payload, opts);
+      completion = result.completion;
+      metadata = result.metadata;
       if (this.abortController) {
         this.abortController.requestCompleted = true;
       }
@@ -783,6 +786,7 @@ class BaseClient {
       iconURL: this.options.iconURL,
       endpoint: this.options.endpoint,
       ...(this.metadata ?? {}),
+      metadata,
     };
 
     if (typeof completion === 'string') {
