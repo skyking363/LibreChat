@@ -149,7 +149,10 @@
       "micromark-extension-math": {
         "katex": "^0.16.21"
       }
-    }
+    },
+    "@langfuse/langchain": "^4.5.1",
+    "@langfuse/otel": "^4.5.1",
+    "@langfuse/tracing": "^4.5.1"
   },
   "nodemonConfig": {
     "ignore": [
